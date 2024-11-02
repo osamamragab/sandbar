@@ -39,6 +39,8 @@
 #define MAX(a, b)				\
 	((a) > (b) ? (a) : (b))
 
+#define LEN(x) (sizeof(x)/sizeof(x[0]))
+
 #define PROGRAM "sandbar"
 #define VERSION "0.2"
 #define USAGE								\
@@ -49,6 +51,8 @@
 	"	-hide-vacant-tags			do not display empty and inactive tags\n" \
 	"	-no-title				do not display current view title\n" \
 	"	-no-status-commands			disable in-line commands in status text\n" \
+	"	-no-mode				do not display current mode \n" \
+	"	-show-layout				display current layout \n" \
 	"	-font [FONT]				specify a font\n" \
 	"	-tags [NUMBER OF TAGS] [FIRST]...[LAST]	specify custom tag names\n" \
 	"	-vertical-padding [PIXELS]		specify vertical pixel padding above and below text\n" \
@@ -70,7 +74,7 @@ typedef struct {
 	struct wl_surface *wl_surface;
 	struct zwlr_layer_surface_v1 *layer_surface;
 	struct zriver_output_status_v1 *river_output_status;
-	
+
 	uint32_t registry_name;
 	char *output_name;
 
@@ -78,11 +82,11 @@ typedef struct {
 	uint32_t width, height;
 	uint32_t textpadding;
 	uint32_t stride, bufsize;
-	
+
 	uint32_t mtags, ctags, urg;
 	bool sel;
 	char *layout, *title, *status;
-	
+
 	bool hidden, bottom;
 	bool redraw;
 
@@ -101,7 +105,7 @@ typedef struct {
 	uint32_t pointer_button;
 
 	char *mode;
-	
+
 	struct wl_list link;
 } Seat;
 
@@ -123,7 +127,7 @@ static char *fontstr = "monospace:size=16";
 static struct fcft_font *font;
 static uint32_t height, textpadding, vertical_padding = 1, buffer_scale = 1;
 
-static bool hidden, bottom, hide_vacant, no_title, no_status_commands;
+static bool hidden, bottom, hide_vacant, no_title, no_status_commands, no_mode, show_layout;
 
 static pixman_color_t active_fg_color = { .red = 0xeeee, .green = 0xeeee, .blue = 0xeeee, .alpha = 0xffff, };
 static pixman_color_t active_bg_color = { .red = 0x0000, .green = 0x5555, .blue = 0x7777, .alpha = 0xffff, };
@@ -133,6 +137,12 @@ static pixman_color_t urgent_fg_color = { .red = 0x2222, .green = 0x2222, .blue 
 static pixman_color_t urgent_bg_color = { .red = 0xeeee, .green = 0xeeee, .blue = 0xeeee, .alpha = 0xffff, };
 static pixman_color_t title_fg_color = { .red = 0xeeee, .green = 0xeeee, .blue = 0xeeee, .alpha = 0xffff, };
 static pixman_color_t title_bg_color = { .red = 0x0000, .green = 0x5555, .blue = 0x7777, .alpha = 0xffff, };
+
+static char* mode_text_map[][2] = {
+	{ "normal",      "[]=" },
+	{ "passthrough", "[~]" },
+	{ "float",       "><>" },
+};
 
 static bool run_display;
 
@@ -305,7 +315,7 @@ draw_text(char *text,
 					x + glyph->x, y - glyph->y, glyph->width, glyph->height);
 			}
 		}
-		
+
 		if (draw_bg) {
 			pixman_image_fill_boxes(PIXMAN_OP_OVER, background,
 						&cur_bg_color, 1, &(pixman_box32_t){
@@ -313,16 +323,16 @@ draw_text(char *text,
 							.y1 = 0, .y2 = buf_height
 						});
 		}
-		
+
 		/* increment pen position */
 		x = nx;
 	}
-	
+
 	if (draw_fg)
 		pixman_image_unref(fg_fill);
 	if (!last_cp)
 		return ix;
-	
+
 	nx = x + padding;
 	if (draw_bg) {
 		/* Fill padding background */
@@ -337,7 +347,7 @@ draw_text(char *text,
 						.y1 = 0, .y2 = buf_height
 					});
 	}
-	
+
 	return nx;
 }
 
@@ -366,28 +376,28 @@ draw_frame(Bar *bar)
 
 	/* Pixman image corresponding to main buffer */
 	pixman_image_t *final = pixman_image_create_bits(PIXMAN_a8r8g8b8, bar->width, bar->height, data, bar->width * 4);
-	
+
 	/* Text background and foreground layers */
 	pixman_image_t *foreground = pixman_image_create_bits(PIXMAN_a8r8g8b8, bar->width, bar->height, NULL, bar->width * 4);
 	pixman_image_t *background = pixman_image_create_bits(PIXMAN_a8r8g8b8, bar->width, bar->height, NULL, bar->width * 4);
-	
+
 	/* Draw on images */
 	uint32_t x = 0;
 	uint32_t y = (bar->height + font->ascent - font->descent) / 2;
 	uint32_t boxs = font->height / 9;
 	uint32_t boxw = font->height / 6 + 2;
-	
+
 	for (uint32_t i = 0; i < tags_l; i++) {
 		const bool active = bar->mtags & 1 << i;
 		const bool occupied = bar->ctags & 1 << i;
 		const bool urgent = bar->urg & 1 << i;
-		
+
 		if (hide_vacant && !active && !occupied && !urgent)
 			continue;
 
 		pixman_color_t *fg_color = urgent ? &urgent_fg_color : (active ? &active_fg_color : &inactive_fg_color);
 		pixman_color_t *bg_color = urgent ? &urgent_bg_color : (active ? &active_bg_color : &inactive_bg_color);
-		
+
 		if (!hide_vacant && occupied) {
 			pixman_image_fill_boxes(PIXMAN_OP_SRC, foreground,
 						fg_color, 1, &(pixman_box32_t){
@@ -404,24 +414,35 @@ draw_frame(Bar *bar)
 							});
 			}
 		}
-		
+
 		x = draw_text(tags[i], x, y, foreground, background, fg_color, bg_color,
 			      bar->width, bar->height, bar->textpadding, false);
 	}
 
-	Seat *seat;
-	wl_list_for_each(seat, &seat_list, link) {
-		x = draw_text(seat->mode, x, y, foreground, background,
-			      &inactive_fg_color, &inactive_bg_color, bar->width,
-			      bar->height, bar->textpadding, false);
+	if (!no_mode) {
+		Seat *seat;
+		wl_list_for_each(seat, &seat_list, link) {
+			char* mode = seat->mode;
+			if (mode) {
+				for (size_t i = 0; i < LEN(mode_text_map); i++)  {
+					if (!strcmp(mode, mode_text_map[i][0])) {
+						mode = mode_text_map[i][1];
+						break;
+					}
+				}
+			}
+			x = draw_text(mode, x, y, foreground, background,
+					&inactive_fg_color, &inactive_bg_color, bar->width,
+					bar->height, bar->textpadding, false);
+		}
 	}
 
-	if (bar->mtags & bar->ctags) {
+	if (show_layout && bar->mtags & bar->ctags) {
 		x = draw_text(bar->layout, x, y, foreground, background,
-			      &inactive_fg_color, &inactive_bg_color, bar->width,
-			      bar->height, bar->textpadding, false);
+				&inactive_fg_color, &inactive_bg_color, bar->width,
+				bar->height, bar->textpadding, false);
 	}
-	
+
 	uint32_t status_width = TEXT_WIDTH(bar->status, bar->width - x, bar->textpadding, true);
 	draw_text(bar->status, bar->width - status_width, y, foreground,
 		  background, &inactive_fg_color, &inactive_bg_color,
@@ -449,7 +470,7 @@ draw_frame(Bar *bar)
 	pixman_image_unref(foreground);
 	pixman_image_unref(background);
 	pixman_image_unref(final);
-	
+
 	munmap(data, bar->bufsize);
 
 	wl_surface_set_buffer_scale(bar->wl_surface, buffer_scale);
@@ -466,15 +487,15 @@ layer_surface_configure(void *data, struct zwlr_layer_surface_v1 *surface,
 			uint32_t serial, uint32_t w, uint32_t h)
 {
 	zwlr_layer_surface_v1_ack_configure(surface, serial);
-	
+
 	Bar *bar = (Bar *)data;
-	
+
 	w *= buffer_scale;
 	h *= buffer_scale;
 
 	if (bar->configured && w == bar->width && h == bar->height)
 		return;
-	
+
 	bar->width = w;
 	bar->height = h;
 	bar->stride = bar->width * 4;
@@ -503,7 +524,7 @@ pointer_enter(void *data, struct wl_pointer *pointer,
 	Seat *seat = (Seat *)data;
 
 	seat->hovering = true;
-	
+
 	if (!cursor_image) {
 		struct wl_cursor_theme *cursor_theme = wl_cursor_theme_load(NULL, 24 * buffer_scale, shm);
 		cursor_image = wl_cursor_theme_get_cursor(cursor_theme, "left_ptr")->images[0];
@@ -522,7 +543,7 @@ pointer_leave(void *data, struct wl_pointer *pointer,
 	      uint32_t serial, struct wl_surface *surface)
 {
 	Seat *seat = (Seat *)data;
-	
+
 	seat->hovering = false;
 }
 
@@ -555,7 +576,7 @@ pointer_frame(void *data, struct wl_pointer *pointer)
 
 	uint32_t button = seat->pointer_button;
 	seat->pointer_button = 0;
-	
+
 	uint32_t i = 0, x = 0;
 	do {
 		if (hide_vacant) {
@@ -586,7 +607,7 @@ pointer_frame(void *data, struct wl_pointer *pointer)
 		zriver_control_v1_run_command(river_control, seat->wl_seat);
 		return;
 	}
-	
+
 	Seat *it;
 	wl_list_for_each(it, &seat_list, link) {
 		x += TEXT_WIDTH(it->mode, seat->bar->width - x, seat->bar->textpadding, false) / buffer_scale;
@@ -614,12 +635,12 @@ pointer_frame(void *data, struct wl_pointer *pointer)
 			return;
 		}
 	}
-	
+
 	if (seat->pointer_x < seat->bar->width / buffer_scale - TEXT_WIDTH(seat->bar->status, seat->bar->width - x, seat->bar->textpadding, true) / buffer_scale) {
 		/* clicked on title */
 		return;
 	}
-	
+
 	/* clicked on status */
 }
 
@@ -724,7 +745,7 @@ seat_capabilities(void *data, struct wl_seat *wl_seat,
 		  uint32_t capabilities)
 {
 	Seat *seat = (Seat *)data;
-	
+
 	const uint32_t has_pointer = capabilities & WL_SEAT_CAPABILITY_POINTER;
 	if (has_pointer && !seat->wl_pointer) {
 		seat->wl_pointer = wl_seat_get_pointer(seat->wl_seat);
@@ -848,7 +869,7 @@ river_seat_status_focused_view(void *data, struct zriver_seat_status_v1 *seat_st
 {
 	if (no_title)
 		return;
-	
+
 	Seat *seat = (Seat *)data;
 
 	if (!seat->bar)
@@ -870,7 +891,7 @@ river_seat_status_mode(void *data, struct zriver_seat_status_v1 *seat_status,
 		free(seat->mode);
 	if (!(seat->mode = strdup(name)))
 		EDIE("strdup");
-	
+
 	Bar *bar;
 	wl_list_for_each(bar, &bar_list, link)
 		bar->redraw = true;
@@ -1015,7 +1036,7 @@ handle_global_remove(void *data, struct wl_registry *registry, uint32_t name)
 {
 	Bar *bar;
 	Seat *seat;
-	
+
 	wl_list_for_each(bar, &bar_list, link) {
 		if (bar->registry_name == name) {
 			wl_list_remove(&bar->link);
@@ -1127,7 +1148,7 @@ read_stdin(void)
 		EDIE("read");
 	if (len == 0)
 		return -1;
-	
+
 	char *linebeg, *lineend, *wordbeg, *wordend;
 	for (linebeg = (char *)&buf;
 	     (lineend = memchr(linebeg, '\n', (char *)&buf + len - linebeg));
@@ -1160,7 +1181,7 @@ read_stdin(void)
 		} else {
 			continue;
 		}
-		
+
 		Bar *bar;
 		if (!strcmp(output, "all")) {
 			wl_list_for_each(bar, &bar_list, link)
@@ -1178,7 +1199,7 @@ read_stdin(void)
 			}
 		}
 	}
-	
+
 	return 0;
 }
 
@@ -1201,14 +1222,14 @@ event_loop(void)
 			else
 				EDIE("select");
 		}
-		
+
 		if (FD_ISSET(wl_fd, &rfds))
 			if (wl_display_dispatch(display) == -1)
 				break;
 		if (FD_ISSET(STDIN_FILENO, &rfds))
 			if (read_stdin() == -1)
 				break;
-		
+
 		Bar *bar;
 		wl_list_for_each(bar, &bar_list, link) {
 			if (bar->redraw) {
@@ -1233,6 +1254,7 @@ main(int argc, char **argv)
 	Bar *bar, *bar2;
 	Seat *seat, *seat2;
 
+
 	/* Parse options */
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "-hide-vacant-tags")) {
@@ -1245,6 +1267,10 @@ main(int argc, char **argv)
 			no_title = true;
 		} else if (!strcmp(argv[i], "-no-status-commands")) {
 			no_status_commands = true;
+		} else if (!strcmp(argv[i], "-no-mode")) {
+			no_mode = true;
+		} else if (!strcmp(argv[i], "-show-layout")) {
+			show_layout = true;
 		} else if (!strcmp(argv[i], "-font")) {
 			if (++i >= argc)
 				DIE("Option -font requires an argument");
@@ -1332,7 +1358,7 @@ main(int argc, char **argv)
 
 	wl_list_init(&bar_list);
 	wl_list_init(&seat_list);
-	
+
 	struct wl_registry *registry = wl_display_get_registry(display);
 	wl_registry_add_listener(registry, &registry_listener, NULL);
 	wl_display_roundtrip(display);
@@ -1363,7 +1389,7 @@ main(int argc, char **argv)
 				EDIE("strdup");
 		}
 	}
-	
+
 	/* Setup bars and seats */
 	wl_list_for_each(bar, &bar_list, link)
 		setup_bar(bar);
@@ -1380,7 +1406,7 @@ main(int argc, char **argv)
 	signal(SIGHUP, sig_handler);
 	signal(SIGTERM, sig_handler);
 	signal(SIGCHLD, SIG_IGN);
-	
+
 	/* Run */
 	run_display = true;
 	event_loop();
@@ -1396,14 +1422,14 @@ main(int argc, char **argv)
 		teardown_bar(bar);
 	wl_list_for_each_safe(seat, seat2, &seat_list, link)
 		teardown_seat(seat);
-	
+
 	zriver_control_v1_destroy(river_control);
 	zriver_status_manager_v1_destroy(river_status_manager);
 	zwlr_layer_shell_v1_destroy(layer_shell);
-	
+
 	fcft_destroy(font);
 	fcft_fini();
-	
+
 	wl_shm_destroy(shm);
 	wl_compositor_destroy(compositor);
 	wl_registry_destroy(registry);
